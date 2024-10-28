@@ -1,12 +1,17 @@
 <?php
 /*
 * Plugin Name: Spot Price Adjustment
-* Plugin URI: http://eux-test-spot-price-adjustment-plugin.com
+* Plugin URI: https://github.com/Wengxinn/wp-price-adjustment-test-plugin
 * Description: A plugin to adjust metal spot prices for WooCommerce.
 * Version: 1.0
 * Author: Weng Xinn Chow
 * Author URI: https://www.linkedin.com/in/weng-xinn-chow/
 */
+
+// Exit if accessed directly
+if (!defined('ABSPATH')) {
+  exit; 
+}
 
 class SpotPriceAdjustmentPlugin {
   private $active_tab;
