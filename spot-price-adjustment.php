@@ -10,6 +10,7 @@
 
 class SpotPriceAdjustmentPlugin {
   private $active_tab;
+  private $metals = ['Gold', 'Silver', 'Platinum', 'Palladium'];
 
   // Constructor
   function __construct() {
@@ -17,7 +18,9 @@ class SpotPriceAdjustmentPlugin {
     add_action('admin_menu', [$this, 'adminSettingsPage']);
     add_action('admin_init', [$this, 'settings']);
     register_activation_hook(__FILE__, [$this, 'initialisePrices']);
-    add_action('init', [$this, 'createProductAttributesCategories']);
+    add_action('init', [$this, 'addProductCategories']);
+    add_action('init', [$this, 'addProductAttributes']);
+    add_filter('woocommerce_get_price_html', [$this, 'displayProductPrice'], 10, 2);
   }
 
   // Add a setting menu to the admin page
@@ -31,7 +34,7 @@ class SpotPriceAdjustmentPlugin {
     );
   }
 
-  // Function to initialise spot prices (as activation hook)
+  // Initialise spot prices upon activation (as an activation hook)
   function initialisePrices() {
     $default_prices = array(
       'gold_adjustment_sell' => 0, 
@@ -75,7 +78,7 @@ class SpotPriceAdjustmentPlugin {
     <?php 
   }
 
-  // Function to register settings, sections and fields
+  // Register settings, sections and fields
   function settings() {
     register_setting('adjustment_settings_group', 'adjustment_settings');
 
@@ -99,13 +102,12 @@ class SpotPriceAdjustmentPlugin {
     $this->addAdjustmentFields();
   }
 
-  // Function to add fields to section
+  // Add fields to sections
   function addAdjustmentFields() {
     $tabs = ['sell' => 'adjustment_sell_section', 'buy' => 'adjustment_buy_section'];
-    $metals = ['gold', 'silver', 'platinum', 'palladium'];
 
     foreach ($tabs as $tab => $section) {
-      foreach ($metals as $metal) {
+      foreach ($this->metals as $metal) {
         add_settings_field(
           $id = "{$metal}_adjustment_{$tab}",
           $title = ucfirst($metal) . ' Adjustment',
@@ -121,7 +123,7 @@ class SpotPriceAdjustmentPlugin {
     }
   }
   
-  // Function to render settings field (for each metal)
+  // Render settings field (for each metal)
   function renderAdjustmentField($args) {
     $option = get_option('adjustment_settings');
     $tab = $args['tab'];
@@ -142,24 +144,142 @@ class SpotPriceAdjustmentPlugin {
     }
   }
 
-  // Function to create product attributes and categories
-  function createProductAttributesCategories() {
+  // Add product attributes (weight, purity, weight unit)
+  function addProductAttributes() {
+    // Insert weight and purity if not already exist
     $attributes = ['weight', 'purity'];
-    $categories = ['Gold', 'Silver', 'Platinum', 'Palladium'];
-
-    // Attributes
     foreach ($attributes as $attribute) {
-      if (!term_exists($attribute, "pa_{$attribute}")) {
-          wp_insert_term($attribute, "pa_{$attribute}"
-          );
+      if (!taxonomy_exists("pa_{$attribute}")) {
+        $attribute_data = [
+          'name' => ucfirst($attribute),
+          'slug' => sanitize_title($attribute),
+          'type' => 'text', 
+          'order_by' => 'menu_order'
+        ];
+        wc_create_attribute($attribute_data);
       }
     }
 
-    // Category
-    foreach ($categories as $category) {
-      if (!term_exists($category, 'product_cat')) {
-          wp_insert_term($category, 'product_cat');
+    // Insert weight unit attribute if not already exists
+    $weight_units = ['oz', 'g', 'kg'];
+    if (!taxonomy_exists("pa_weight_unit")) {
+      $attribute_data = [
+        'name' => 'Weight unit',
+        'slug' => 'weight_unit',
+        'type' => 'select', 
+        'order_by' => 'menu_order'
+      ];
+      wc_create_attribute($attribute_data);
+    }
+    // Add unit terms to the attribute (pa_weight_units)
+    foreach ($weight_units as $unit) {
+      if (!term_exists($unit, 'pa_weight_unit')) {
+        wp_insert_term($unit, 'pa_weight_unit'); 
+     }
+    }
+  }
+
+  // Add product categories (metals)
+  function addProductCategories() {
+    // Insert categories if not already exist
+    foreach ($this->metals as $metal) {
+      if (!term_exists($metal, 'product_cat')) {
+        wp_insert_term($metal, 'product_cat');
       }
+    }
+  }
+
+  // Function to fetch the current metal price based on the specified unit
+  function fetchMetalPrice($metal, $unit) {
+    // Fetch current metal price using the remote api
+    $api_url = 'https://api.nfusionsolutions.biz/api/v1/Metals/spot/summary?metals=' . $metal . '&unitofmeasure=' . $unit . '&currency=aud&format=json&token=a1f2ffe5-6b4f-4cad-9947-0bdba9ea8af0';
+    $response = wp_remote_get($api_url);
+    if (is_wp_error($response)) {
+      error_log('Error when fetching metal price: ' . $response->get_error_message());
+      return false;
+    }
+
+    // Example reponse: [{"requestedSymbol":"gold","requestedCurrency":"AUD","requestedUnitOfMeasure":"oz","success":true,"data":{"symbol":"Gold","baseCurrency":"USD","last":3771.0540491760253,"bid":3769.673997228417,"ask":3772.4341011236324,"high":3794.535633064572,"low":3760.7519613871323,"open":3792.3068491691856,"oneDayValue":3792.3068491691856,"oneDayChange":-21.25279999316051,"oneDayPercentChange":-0.56042,"timeStamp":"2024-10-28T09:05:54+00:00"}}]
+    // Convert JSON response to array
+    $data = json_decode(wp_remote_retrieve_body($response), true);
+    if (isset($data[0]['data'])) {
+      // Use the last traded price
+      return $data[0]['data']['last'];
+    }
+  }
+
+  function displayProductPrice($price, $product) {
+    // Retrieve all categories of the product (only retrieve names)
+    $categories = wp_get_post_terms($product->get_id(), 'product_cat', ['fields' => 'names']);
+
+    // Check if the product belongs to one of the metals/categories
+    $metal_array = array_intersect($this->metals, $categories);
+
+    // Retrieve weight, purity, and weight unit attributes
+    $weight = (float) $product->get_attribute('pa_weight');
+    $purity = (float) $product->get_attribute('pa_purity');
+    $weight_unit = $product->get_attribute('pa_weight_unit');
+
+    // If the product belongs to any of the metals 
+    // or has metal attributes (weight, weight units, purity)
+    if (!empty($metal_array) && $weight > 0 && $purity > 0) {
+      $metal = reset($metal_array);
+
+      $adjustment_option = get_option('adjustment_settings');
+      // Assign to the value if adjusted; otherwise set to 0
+      $saved_adjustment_price = $adjustment_option["{$metal}_adjustment_sell"] ?? 0;
+
+      // Adjust product price if spot price is set
+      // Saved adjustment price / 31.10 x weight (attribute) x purity (attribute) - current product price  
+      if ($saved_adjustment_price > 0) {
+        // Fetch the current metal price
+        $current_price = $this->fetchMetalPrice($metal, $weight_unit);
+        if ($current_price === false) {
+          return false;
+        }
+
+        $new_price = ($saved_adjustment_price / 31.10) * $weight * $purity - $current_price;
+        return wc_price($new_price);
+      }
+    }
+    return $price;  
+  }
+
+  // Function to get the buyback price
+  function getBuyBackPrice($sku_metal, $weight, $purity, $unit) {
+    // Try to fetch product through sku
+    $product = wc_get_product($sku_metal);
+        
+    // Sku is given, get the product category
+    if ($product) {
+      // Retrieve all categories of the product (only retrieve names)
+      $categories = wp_get_post_terms($product->get_id(), 'product_cat', ['fields' => 'names']);
+      // Check if the product belongs to one of the metals/categories
+      $metal_array = array_intersect($this->metals, $categories);
+      // The product belongs to any of the metals
+      if (!empty($metal_array)) {
+        $metal = reset($metal_array);
+      }
+    } else {
+      // Metal (category) is given
+      $metal = $sku_metal;
+    }
+
+    // Retrieve saved adjustment buyback price
+    $adjustment_option = get_option('adjustment_settings');
+    $saved_adjustment_price = $adjustment_option["{$metal}_adjustment_buy"] ?? 0;
+
+    // Adjust product by back price if spot buy price is set
+    // (Current metal price - Saved adjustment buy back price) x weight (attribute) x purity (attribute)
+    if ($saved_adjustment_price > 0) {
+      // Fetch the current metal price
+      $current_price = $this->fetchMetalPrice($metal, $weight_unit);
+      if ($current_price === false) {
+        return false;
+      }
+
+      $buyback_price = ($current_price - $saved_adjustment_price) * $weight * $purity;
+      return wc_price($buyback_price);
     }
   }
 
