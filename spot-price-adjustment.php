@@ -179,13 +179,30 @@ class SpotPriceAdjustmentPlugin {
     }
   }
 
-  // Add product categories (metals)
+  // Add product categories, and metal attribute
   function addProductCategories() {
     // Insert categories if not already exist
     foreach ($this->metals as $metal) {
       if (!term_exists($metal, 'product_cat')) {
         wp_insert_term($metal, 'product_cat');
       }
+    }
+
+    // Insert metal attribute if not already exist
+    if (!taxonomy_exists("pa_metal")) {
+      $attribute_data = [
+        'name' => 'Metal',
+        'slug' => 'metal',
+        'type' => 'select', 
+        'order_by' => 'menu_order'
+      ];
+      wc_create_attribute($attribute_data);
+    }
+    // Add unit terms to the attribute (pa_metal)
+    foreach ($this->metals as $metal) {
+      if (!term_exists($metal, 'pa_metal')) {
+        wp_insert_term($metal, 'pa_metal'); 
+     }
     }
   }
 
@@ -215,34 +232,39 @@ class SpotPriceAdjustmentPlugin {
     // Check if the product belongs to one of the metals/categories
     $metal_array = array_intersect($this->metals, $categories);
 
-    // Retrieve weight, purity, and weight unit attributes
+    // If the product does not belongs to any of the metals or no Metal attribute, display initial price
+    if (!empty($metal_array)) {
+      $metal = reset($metal_array);
+    } else {
+      // Retrieve metal attribute
+      $metal = $product->get_attribute('pa_metal');
+      // Not a metal product
+      if (!isset($metal)) {
+        return $price;
+      }
+    }
+
+    // Update adjusted price
     $weight = (float) $product->get_attribute('pa_weight');
     $purity = (float) $product->get_attribute('pa_purity');
     $weight_unit = $product->get_attribute('pa_weight_unit');
 
-    // If the product belongs to any of the metals 
-    // or has metal attributes (weight, weight units, purity)
-    if (!empty($metal_array) && $weight > 0 && $purity > 0) {
-      $metal = reset($metal_array);
+    $adjustment_option = get_option('adjustment_settings');
+    // Assign to the value if adjusted; otherwise set to 0
+    $saved_adjustment_price = $adjustment_option["{$metal}_adjustment_sell"] ?? 0;
 
-      $adjustment_option = get_option('adjustment_settings');
-      // Assign to the value if adjusted; otherwise set to 0
-      $saved_adjustment_price = $adjustment_option["{$metal}_adjustment_sell"] ?? 0;
-
-      // Adjust product price if spot price is set
-      // Saved adjustment price / 31.10 x weight (attribute) x purity (attribute) - current product price  
-      if ($saved_adjustment_price > 0) {
-        // Fetch the current metal price
-        $current_price = $this->fetchMetalPrice($metal, $weight_unit);
-        if ($current_price === false) {
-          return false;
-        }
-
-        $new_price = ($saved_adjustment_price / 31.10) * $weight * $purity - $current_price;
-        return wc_price($new_price);
+    // Adjust product price if spot price is set
+    // Saved adjustment price / 31.10 x weight (attribute) x purity (attribute) - current product price  
+    if ($saved_adjustment_price > 0) {
+      // Fetch the current metal price
+      $current_price = $this->fetchMetalPrice($metal, $weight_unit);
+      if ($current_price === false) {
+        return false;
       }
+
+      $new_price = ($saved_adjustment_price / 31.10) * $weight * $purity - $current_price;
+      return wc_price($new_price);
     }
-    return $price;  
   }
 
   // Function to get the buyback price
@@ -256,9 +278,14 @@ class SpotPriceAdjustmentPlugin {
       $categories = wp_get_post_terms($product->get_id(), 'product_cat', ['fields' => 'names']);
       // Check if the product belongs to one of the metals/categories
       $metal_array = array_intersect($this->metals, $categories);
+      
       // The product belongs to any of the metals
       if (!empty($metal_array)) {
         $metal = reset($metal_array);
+        // Check metal attribute if category not found
+        if (!isset($metal)) {
+          $metal = $product->get_attribute('pa_metal');
+        }
       }
     } else {
       // Metal (category) is given
